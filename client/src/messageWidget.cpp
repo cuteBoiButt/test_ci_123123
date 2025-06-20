@@ -1,7 +1,9 @@
+#include <wx/graphics.h>
 #include <client/messageWidget.h>
 #include <client/textUtil.h>
 #include <client/message.h>
 #include <client/wsClient.h>
+#include <client/cachedColorText.h>
 
 enum {
     ID_COPY = wxID_HIGHEST + 40
@@ -45,9 +47,9 @@ MessageWidget::MessageWidget(wxWindow* parent,
     mainSizer->Add(headerSizer, 0, wxEXPAND | wxBOTTOM, FromDIP(2));
 
     // Wrap the original message using our utility function
-    wxString wrapped = TextUtil::WrapText(this, m_originalMessage, lastKnownWrapWidth - FromDIP(10), wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT));
+    wxString wrapped = TextUtil::WrapText(this, m_originalMessage, lastKnownWrapWidth - FromDIP(10), this->GetFont());
 
-    m_messageStaticText = new wxStaticText(this, wxID_ANY, wrapped,
+    m_messageStaticText = new CachedColorText(this, wxID_ANY, wrapped,
                                           wxDefaultPosition, wxDefaultSize,
                                           wxALIGN_LEFT); // Ensure left alignment
     m_messageStaticText->Wrap(-1);
@@ -118,6 +120,7 @@ void MessageWidget::OnRightClick(wxMouseEvent& event) {
 
 void MessageWidget::OnMouseEnter(wxMouseEvent& event) {
     SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE));
+    m_messageStaticText->InvalidateCache();
     Refresh();
     event.Skip();
 }
@@ -128,6 +131,7 @@ void MessageWidget::OnMouseLeave(wxMouseEvent& event) {
     wxPoint clientPos = ScreenToClient(screenPos);
     if (!GetClientRect().Contains(clientPos)) {
         SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+        m_messageStaticText->InvalidateCache();
         Refresh();
     }
     event.Skip();
