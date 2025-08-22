@@ -118,6 +118,7 @@ jobs:
           ./squashfs-root/AppRun --appdir AppDir --output appimage
 
       - name: Generate SLSA Attestation for binaries
+        if: github.ref_type == 'tag'
         id: slsa
         uses: actions/attest-build-provenance@v1
         with:
@@ -137,8 +138,10 @@ jobs:
               cp "$f" upload_dir/
             fi
           done
-          # Copy the attestation bundle
-          cp "${{ steps.slsa.outputs.bundle-path }}" upload_dir/
+          # Conditionally copy the attestation bundle, which only exists on tag runs
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            cp "${{ steps.slsa.outputs.bundle-path }}" upload_dir/
+          fi
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -193,7 +196,7 @@ jobs:
           tags: ghcr.io/${{ steps.docker_meta.outputs.repo_lc }}-server:${{ steps.docker_meta.outputs.tag }}
 
       - name: Attest Server Docker image
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && github.ref_type == 'tag'
         uses: actions/attest-build-provenance@v1
         with:
           subject-name: ghcr.io/${{ steps.docker_meta.outputs.repo_lc }}-server
@@ -211,7 +214,7 @@ jobs:
           tags: ghcr.io/${{ steps.docker_meta.outputs.repo_lc }}-aggregator:${{ steps.docker_meta.outputs.tag }}
 
       - name: Attest Aggregator Docker image
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && github.ref_type == 'tag'
         uses: actions/attest-build-provenance@v1
         with:
           subject-name: ghcr.io/${{ steps.docker_meta.outputs.repo_lc }}-aggregator
@@ -268,4 +271,4 @@ jobs:
             --title "Release $TAG" \
             --notes "$NOTES" \
             --latest \
-            artifacts/*/* # Upload all downloaded files: binaries and their attestations
+            artifacts/*/*
