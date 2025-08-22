@@ -19,9 +19,13 @@ jobs:
         os: [ubuntu-24.04, macos-13, windows-2025]
 
     # Grant permissions to write to the GitHub Packages container registry
+    # AND generate signed attestations.
     permissions:
       contents: read
       packages: write
+      # These two permissions are REQUIRED for the official attestation action.
+      id-token: write
+      attestations: write
 
     steps:
       - uses: actions/checkout@v4
@@ -116,6 +120,16 @@ jobs:
           rm linuxdeploy-x86_64.AppImage
           ./squashfs-root/AppRun --appdir AppDir --output appimage
 
+      - name: Generate SLSA Attestation for binaries
+        id: slsa
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: |
+            build/*.dmg
+            build/*.zip
+            build/*.tar.gz
+            build/*.AppImage
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -125,6 +139,7 @@ jobs:
             build/*.zip
             build/*.tar.gz
             build/*.AppImage
+            ${{ steps.slsa.outputs.bundle-path }}
 
       - name: Log in to GitHub Container Registry
         if: runner.os == 'Linux'
@@ -164,6 +179,7 @@ jobs:
 
       - name: Build and push Server Docker image
         if: runner.os == 'Linux'
+        id: build_server_image
         uses: docker/build-push-action@v5
         with:
           context: docker_contexts/server
@@ -171,14 +187,31 @@ jobs:
           push: true
           tags: ghcr.io/${{ steps.docker_meta.outputs.repo_lc }}-server:${{ steps.docker_meta.outputs.tag }}
 
+      - name: Attest Server Docker image
+        if: runner.os == 'Linux'
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ghcr.io/${{ steps.docker_meta.outputs.repo_lc }}-server
+          subject-digest: ${{ steps.build_server_image.outputs.digest }}
+          push-to-registry: true
+
       - name: Build and push Aggregator Docker image
         if: runner.os == 'Linux'
+        id: build_aggregator_image
         uses: docker/build-push-action@v5
         with:
           context: docker_contexts/aggregator
           file: ./Dockerfile.aggregator
           push: true
           tags: ghcr.io/${{ steps.docker_meta.outputs.repo_lc }}-aggregator:${{ steps.docker_meta.outputs.tag }}
+
+      - name: Attest Aggregator Docker image
+        if: runner.os == 'Linux'
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ghcr.io/${{ steps.docker_meta.outputs.repo_lc }}-aggregator
+          subject-digest: ${{ steps.build_aggregator_image.outputs.digest }}
+          push-to-registry: true
 
       - name: Generate Doxygen documentation
         if: runner.os == 'Linux'
@@ -211,29 +244,18 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      id-token: write
     steps:
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
 
-      - name: Generate and sign SLSA provenance attestations
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          for file in artifacts/*/*; do
-            if [ -f "$file" ]; then
-              gh attest --repo "$GITHUB_REPOSITORY" --provenance -f "$file" -o "${file}.attestation.json"
-            fi
-          done
-
       - name: Create Release and Upload Verifiable Artifacts
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
-          NOTES="This release includes cryptographically signed SLSA provenance attestations.
+          NOTES="This release includes cryptographically signed SLSA provenance attestations for all binaries and container images.
           You can verify the integrity and origin of these files using the official GitHub CLI or slsa-verifier.
           See: https://github.com/slsa-framework/slsa-verifier"
 
@@ -241,5 +263,4 @@ jobs:
             --title "Release $TAG" \
             --notes "$NOTES" \
             --latest \
-            artifacts/*/*
-
+            artifacts/*/* # Upload all downloaded files: binaries and their attestations
