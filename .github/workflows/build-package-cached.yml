@@ -3,6 +3,11 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*' # Trigger on tags like v1.0, v2.3.4
+  pull_request:
+    branches:
+      - main
 
 jobs:
   build:
@@ -22,20 +27,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+          fetch-depth: 0
 
       - uses: lukka/get-cmake@latest
         with:
-          cmakeVersion: 4.0.2
-          ninjaVersion: 1.12.1
+          cmakeVersion: 4.0.3
+          ninjaVersion: 1.13.1
 
       # On Windows runners, ensure the Developer Command Prompt environment is set up.
       - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
 
       - name: Bootstrap vcpkg
         shell: bash
         run: ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
 
-      - name: Install Mono (for Linux runner)
+      - name: Install Dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
@@ -43,8 +50,6 @@ jobs:
 
       - name: Configure NuGet credentials using vcpkg's nuget.exe
         shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }} 
         run: |
           # Get the path to vcpkg's managed nuget.exe. tr -d '\r' is for Windows compatibility.
           NUGET_EXE_PATH=$(./vcpkg/vcpkg fetch nuget | tail -n 1 | tr -d '\r')
@@ -59,7 +64,7 @@ jobs:
           # Add the source with credentials, as per the documentation
           $CMD_PREFIX "$NUGET_EXE_PATH" sources add \
             -Name "github" \
-            -Source "https://nuget.pkg.github.com/cuteBoiButt/index.json" \
+            -Source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" \
             -UserName "GITHUB_TOKEN" \
             -Password "${{ secrets.GITHUB_TOKEN }}" \
             -StorePasswordInClearText
@@ -67,12 +72,12 @@ jobs:
           echo "Setting API key..."
           # Set the API key for the source to ensure push access
           $CMD_PREFIX "$NUGET_EXE_PATH" setapikey "${{ secrets.GITHUB_TOKEN }}" \
-            -Source "https://nuget.pkg.github.com/cuteBoiButt/index.json"
+            -Source "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
   
       - name: Set vcpkg binary sources environment variable
         shell: bash
         run: |
-          echo "VCPKG_BINARY_SOURCES=clear;nuget,https://nuget.pkg.github.com/cuteBoiButt/index.json,read" >> $GITHUB_ENV
+          echo "VCPKG_BINARY_SOURCES=clear;nuget,https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json,readwrite" >> $GITHUB_ENV
           
       - name: Configure CMake
         run: |
@@ -136,18 +141,25 @@ jobs:
           echo "Preparing Docker build contexts from CPack output..."
           SERVER_TARBALL=$(find build -name '*-server.tar.gz' | head -n 1)
           AGGREGATOR_TARBALL=$(find build -name '*-aggregator.tar.gz' | head -n 1)
-          if [ -z "$SERVER_TARBALL" ]; then echo "::error::Server tarball not found!"; exit 1; fi
-          if [ -z "$AGGREGATOR_TARBALL" ]; then echo "::error::Aggregator tarball not found!"; exit 1; fi
           mkdir -p docker_contexts/server docker_contexts/aggregator
           tar -xvf "$SERVER_TARBALL" -C docker_contexts/server
           tar -xvf "$AGGREGATOR_TARBALL" -C docker_contexts/aggregator
 
-      - name: Set repository name to lowercase
+      - name: Generate dynamic Docker tags
         if: runner.os == 'Linux'
-        id: set_repo_lc
-        shell: bash
+        id: docker_meta
         run: |
-          echo "repo_lc=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+          REPO_LC=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')
+          echo "repo_lc=${REPO_LC}" >> $GITHUB_OUTPUT
+
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            TAG="${{ github.ref_name }}"
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            TAG="latest"
+          else
+            TAG=$(echo "${{ github.sha }}" | cut -c1-7)
+          fi
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
 
       - name: Build and push Server Docker image
         if: runner.os == 'Linux'
@@ -156,7 +168,7 @@ jobs:
           context: docker_contexts/server
           file: ./Dockerfile.server
           push: true
-          tags: ghcr.io/${{ steps.set_repo_lc.outputs.repo_lc }}-server:latest
+          tags: ghcr.io/${{ steps.docker_meta.outputs.repo_lc }}-server:${{ steps.docker_meta.outputs.tag }}
 
       - name: Build and push Aggregator Docker image
         if: runner.os == 'Linux'
@@ -165,7 +177,7 @@ jobs:
           context: docker_contexts/aggregator
           file: ./Dockerfile.aggregator
           push: true
-          tags: ghcr.io/${{ steps.set_repo_lc.outputs.repo_lc }}-aggregator:latest
+          tags: ghcr.io/${{ steps.docker_meta.outputs.repo_lc }}-aggregator:${{ steps.docker_meta.outputs.tag }}
 
       - name: Generate Doxygen documentation
         if: runner.os == 'Linux'
@@ -179,6 +191,7 @@ jobs:
 
   deploy-gh-pages:
     needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       pages: write
       id-token: write
@@ -190,3 +203,41 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+  create-release:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Generate and sign SLSA provenance attestations
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for file in artifacts/*/*; do
+            if [ -f "$file" ]; then
+              gh attest --repo "$GITHUB_REPOSITORY" --provenance -f "$file" -o "${file}.attestation.json"
+            fi
+          done
+
+      - name: Create Release and Upload Verifiable Artifacts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          NOTES="This release includes cryptographically signed SLSA provenance attestations.
+          You can verify the integrity and origin of these files using the official GitHub CLI or slsa-verifier.
+          See: https://github.com/slsa-framework/slsa-verifier"
+
+          gh release create "$TAG" \
+            --title "Release $TAG" \
+            --notes "$NOTES" \
+            --latest \
+            artifacts/*/*
