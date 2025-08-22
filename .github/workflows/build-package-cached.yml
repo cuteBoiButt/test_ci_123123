@@ -18,12 +18,9 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-13, windows-2025]
 
-    # Grant permissions to write to the GitHub Packages container registry
-    # AND generate signed attestations.
     permissions:
       contents: read
       packages: write
-      # These two permissions are REQUIRED for the official attestation action.
       id-token: write
       attestations: write
 
@@ -130,16 +127,24 @@ jobs:
             build/*.tar.gz
             build/*.AppImage
 
+      - name: Prepare Artifacts for Upload
+        shell: bash
+        run: |
+          mkdir upload_dir
+          # Copy all package files, but only if they exist
+          for f in build/*.dmg build/*.zip build/*.tar.gz build/*.AppImage; do
+            if [ -f "$f" ]; then
+              cp "$f" upload_dir/
+            fi
+          done
+          # Copy the attestation bundle
+          cp "${{ steps.slsa.outputs.bundle-path }}" upload_dir/
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: release-packages-${{ matrix.os }}
-          path: |
-            build/*.dmg
-            build/*.zip
-            build/*.tar.gz
-            build/*.AppImage
-            ${{ steps.slsa.outputs.bundle-path }}
+          path: upload_dir/
 
       - name: Log in to GitHub Container Registry
         if: runner.os == 'Linux'
