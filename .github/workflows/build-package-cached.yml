@@ -250,6 +250,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -269,3 +271,4 @@ jobs:
             --notes "$NOTES" \
             --latest \
             artifacts/*/* # Upload all downloaded files: binaries and their attestations
+
