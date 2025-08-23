@@ -132,13 +132,11 @@ jobs:
         shell: bash
         run: |
           mkdir upload_dir
-          # Copy all package files, but only if they exist
           for f in build/*.dmg build/*.zip build/*.tar.gz build/*.AppImage; do
             if [ -f "$f" ]; then
               cp "$f" upload_dir/
             fi
           done
-          # Conditionally copy the attestation bundle, which only exists on tag runs
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             cp "${{ steps.slsa.outputs.bundle-path }}" upload_dir/
           fi
@@ -233,7 +231,7 @@ jobs:
 
   deploy-gh-pages:
     needs: build
-    if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       pages: write
       id-token: write
@@ -259,28 +257,33 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
-
-      - name: Rename attestation files for uniqueness
+          pattern: release-packages-*
+      
+      - name: Package Final Release Archives
+        shell: bash
         run: |
+          mkdir final_releases
           for dir in artifacts/*/; do
-            if [ -f "${dir}attestation.jsonl" ]; then
-              dir_name=$(basename "$dir")
-              mv "${dir}attestation.jsonl" "${dir}attestation-${dir_name}.jsonl"
-              echo "Renamed attestation in ${dir_name}"
-            fi
+            dir_name=$(basename "$dir")
+            archive_name="${dir_name#release-packages-}.zip"
+            # Create a clean zip for each platform (e.g., windows-2025.zip)
+            zip -j "final_releases/${archive_name}" "${dir}"*
+            echo "Created final archive: ${archive_name}"
           done
-
+      
       - name: Create Release and Upload Verifiable Artifacts
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
           NOTES="This release includes cryptographically signed SLSA provenance attestations for all binaries and container images.
+          Each platform archive below contains both the application and its signed attestation.
           You can verify the integrity and origin of these files using the official GitHub CLI or slsa-verifier.
           See: https://github.com/slsa-framework/slsa-verifier"
 
+          # Upload the newly created final archives
           gh release create "$TAG" \
             --title "Release $TAG" \
             --notes "$NOTES" \
             --latest \
-            artifacts/*/*
+            final_releases/*
